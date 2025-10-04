@@ -25,7 +25,7 @@ Telegram交流反馈群组：https://t.me/eooceu
 * 可在脚本前添加PORT变量，随脚本一起运行，即可定义端口，需确保PORT端口后面的3个端口可用，否则节点不通
 * 可选环境变量PORT CFIP CFPORT
 
-## VPS一键四协议安装脚本
+## VPS一键reality+hy2脚本
 ```
 bash <(curl -Ls https://raw.githubusercontent.com/virus2010/sb2/main/sb2.sh)
 ```
