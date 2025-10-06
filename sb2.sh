@@ -12,7 +12,7 @@ re="\033[0m"
 red="\033[1;91m"
 green="\e[1;32m"
 yellow="\e[1;33m"
-purple="\e[1;35m"
+purple="\e1;35m"
 skyblue="\e[1;36m"
 red() { echo -e "\e[1;91m$1\033[0m"; }
 green() { echo -e "\e[1;32m$1\033[0m"; }
@@ -402,33 +402,80 @@ EOF
     rc-update add sing-box default > /dev/null 2>&1
 }
 
-# 生成节点和订阅链接
+# 生成节点信息 (原始 URL 和 Clash Meta 格式)
 get_info() {  
   yellow "\nip检测中,请稍等...\n"
   server_ip=$(get_realip)
   clear
   isp=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g' || echo "vps")
   
-  # vless-reality
+  # --- Vless-Reality 配置获取 ---
   vless_port_config=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .listen_port' "$config_dir")
-  public_key=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.reality.private_key' "$config_dir" | /etc/sing-box/sing-box generate reality-keypair | awk '/PublicKey:/ {print $2}')
+  uuid=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .users[0].uuid' "$config_dir")
+  private_key=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.reality.private_key' "$config_dir")
+  # 重新生成公钥以防万一
+  public_key=$(/etc/sing-box/sing-box generate reality-keypair --private-key "$private_key" | awk '/PublicKey:/ {print $2}')
   vless_sni=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.server_name' "$config_dir")
 
-  # hysteria2
-  hy2_port_config=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .listen_port' "$config_dir")
+  # Clash Meta Vless Reality 格式
+  VLESS_META="name: ${isp}_VLESS-REALITY
+type: vless
+server: ${server_ip}
+port: ${vless_port_config}
+uuid: ${uuid}
+network: tcp
+udp: true
+tls: true
+servername: ${vless_sni}
+client-fingerprint: chrome
+reality-opts: {public-key: ${public_key}, short-id: \"\"}
+flow: xtls-rprx-vision"
   
-  # 清理旧的url.txt并生成新的
+  # --- Hysteria2 配置获取 ---
+  hy2_port_config=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .listen_port' "$config_dir")
+  hy2_password=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .users[0].password' "$config_dir")
+  
+  # 检查是否有端口跳跃参数
+  mport_param=$(grep 'hysteria2://' $client_dir | sed -n 's/.*mport=\([^#&]*\).*/mport=\1/p')
+
+  # Hysteria2 URL (用于兼容客户端)
+  HY2_URL="hysteria2://${hy2_password}@${server_ip}:${hy2_port_config}/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none"
+  [ -n "$mport_param" ] && HY2_URL="${HY2_URL}&${mport_param}"
+  HY2_URL="${HY2_URL}#${isp}_HYSTERIA2"
+
+  # Clash Meta Hysteria2 格式
+  HY2_META="name: ${isp}_HYSTERIA2${mport_param/+/_JUMP}
+type: hysteria2
+server: ${server_ip}
+port: ${hy2_port_config}
+password: ${hy2_password}
+obfs: none
+tls:
+  sni: www.bing.com
+  insecure: true
+  alpn:
+    - h3"
+  [ -n "$mport_param" ] && HY2_META="${HY2_META}
+mport: ${mport_param/mport=/}"
+
+  # --- 写入文件 (原始 URL 格式) ---
   cat > ${work_dir}/url.txt <<EOF
 vless://${uuid}@${server_ip}:${vless_port_config}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${vless_sni}&fp=chrome&pbk=${public_key}&type=tcp&headerType=none#${isp}_VLESS-REALITY
 
-hysteria2://${uuid}@${server_ip}:${hy2_port_config}/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none#${isp}_HYSTERIA2
+${HY2_URL}
 EOF
-  # 生成 Base64 订阅内容
-  base64 -w0 ${work_dir}/url.txt > ${work_dir}/sub.txt
-  chmod 644 ${work_dir}/sub.txt
+
+  # --- 写入文件 (Clash Meta 格式) ---
+  cat > ${work_dir}/meta.txt <<EOF
+# --- Vless-Reality (Clash Meta/Mihomo 配置片段) ---
+${VLESS_META}
+
+# --- Hysteria2 (Clash Meta/Mihomo 配置片段) ---
+${HY2_META}
+EOF
 }
 
-# 通用服务管理函数
+# 通用服务管理函数 (保持不变)
 manage_service() {
     local service_name="$1"
     local action="$2"
@@ -568,7 +615,7 @@ uninstall_singbox() {
    esac
 }
 
-# 创建快捷指令
+# 创建快捷指令 (保持不变)
 create_shortcut() {
   cat > "$work_dir/sb.sh" << EOF
 #!/usr/bin/env bash
@@ -585,13 +632,13 @@ EOF
   fi
 }
 
-# 适配alpine运行dns的问题
+# 适配alpine运行dns的问题 (保持不变)
 change_hosts() {
     sed -i '1s/.*/127.0.0.1   localhost/' /etc/hosts
     sed -i '2s/.*/::1         localhost/' /etc/hosts
 }
 
-# 变更配置
+# 变更配置 (精简并修复端口跳跃逻辑)
 change_config() {
     # 检查sing-box状态
     local singbox_status=$(check_singbox 2>/dev/null)
@@ -638,10 +685,8 @@ change_config() {
                     sed -i '/"type": "vless"/,/listen_port/ s/"listen_port": [0-9]\+/"listen_port": '"$new_port"'/' $config_dir
                     restart_singbox
                     allow_port $new_port/tcp > /dev/null 2>&1
-                    sed -i 's/\(vless:\/\/[^@]*@[^:]*:\)[0-9]\{1,\}/\1'"$new_port"'/' $client_dir
-                    get_info # 重新生成订阅文件
-                    while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
-                    green "\nvless-reality端口已修改成：${purple}$new_port${re} ${green}请更新或手动更改vless-reality端口${re}\n"
+                    get_info # 重新生成节点信息
+                    check_nodes
                     ;;
                 2)
                     reading "\n请输入hysteria2端口 (回车跳过将使用随机端口): " new_port
@@ -649,11 +694,8 @@ change_config() {
                     sed -i '/"type": "hysteria2"/,/listen_port/ s/"listen_port": [0-9]\+/"listen_port": '"$new_port"'/' $config_dir
                     restart_singbox
                     allow_port $new_port/udp > /dev/null 2>&1
-                    # 确保只替换了主端口，保留 mport 参数
-                    sed -i -E 's/(hysteria2:\/\/[^@]*@[^:]*:)[0-9]+(\/.*#.*)/\1'"$new_port"'\2/' $client_dir
-                    get_info # 重新生成订阅文件
-                    while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
-                    green "\nhysteria2端口已修改为：${purple}${new_port}${re} ${green}请更新或手动更改hysteria2端口${re}\n"
+                    get_info # 重新生成节点信息
+                    check_nodes
                     ;;
                 0)  change_config ;;
                 *)  red "无效的选项，请输入 1 或 2" ;;
@@ -669,11 +711,8 @@ change_config() {
             ' $config_dir
 
             restart_singbox
-            # 替换所有节点的 UUID/密码
-            sed -i -E 's/(vless:\/\/|hysteria2:\/\/)[^@/]*(@|\/)/\1'"$new_uuid"'\2/' $client_dir
-            get_info # 重新生成订阅文件
-            while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
-            green "\nUUID已修改为：${purple}${new_uuid}${re} ${green}请更新或手动更改所有节点的UUID${re}\n"
+            get_info # 重新生成节点信息
+            check_nodes
             ;;
         3)  
             clear
@@ -700,12 +739,8 @@ change_config() {
                 (.inbounds[] | select(.type == "vless") | .tls.reality.handshake.server) = $new_sni
                 ' "$config_dir" > "/tmp/config.json.tmp" && mv "/tmp/config.json.tmp" "$config_dir"
                 restart_singbox
-                # 更新 vless 节点的 sni
-                sed -i "s/\(vless:\/\/[^\?]*\?\([^\&]*\&\)*sni=\)[^&]*/\1$new_sni/" $client_dir
-                get_info # 重新生成订阅文件
-                while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
-                echo ""
-                green "\nReality sni已修改为：${purple}${new_sni}${re} ${green}请更新或手动更改reality节点的sni域名${re}\n"
+                get_info # 重新生成节点信息
+                check_nodes
             ;; 
         4)  
             purple "端口跳跃需确保跳跃区间的端口没有被占用，nat鸡请注意可用端口范围，否则可能造成节点不通\n"
@@ -722,11 +757,10 @@ change_config() {
             iptables -t nat -A PREROUTING -p udp --dport $min_port:$max_port -j DNAT --to-destination :$listen_port > /dev/null
             command -v ip6tables &> /dev/null && ip6tables -t nat -A PREROUTING -p udp --dport $min_port:$max_port -j DNAT --to-destination :$listen_port > /dev/null
             
-            # 规则持久化 (与 allow_port 逻辑类似，简化避免重复安装)
+            # 规则持久化
             if command_exists rc-service 2>/dev/null; then
                 iptables-save > /etc/iptables/rules.v4
                 command -v ip6tables &> /dev/null && ip6tables-save > /etc/iptables/rules.v6
-                # Alpine 需要确保 iptables 服务在启动时加载规则
                 if ! grep -q "iptables-restore" /etc/init.d/iptables 2>/dev/null; then
                     cat << 'EOF' > /etc/init.d/iptables
 #!/sbin/openrc-run
@@ -749,18 +783,14 @@ EOF
 
             restart_singbox
             
-            # 更新 hysteria2 节点 URL，添加 mport 参数
-            uuid=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .users[0].password' "$config_dir")
-            isp=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g' || echo "vps")
+            # 标记端口跳跃参数到 url.txt 文件，方便 get_info 读取
+            # 注意：这里我们只更新 url.txt 中的 hysteria2 节点行，添加 mport 参数
+            mport_tag="&mport=${min_port}-${max_port}"
+            sed -i.bak '/hysteria2:/d' $client_dir # 删除旧的 hysteria2 行
+            echo "hysteria2://${uuid}@$ip:$listen_port/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none${mport_tag}#${isp}_HYSTERIA2-JUMP" >> $client_dir
             
-            # 移除旧的 hysteria2 节点 (如果存在多行)
-            sed -i.bak "/hysteria2:/d" $client_dir
-            # 插入新的 hysteria2 节点
-            echo "hysteria2://${uuid}@$ip:$listen_port/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none&mport=$min_port-$max_port#${isp}_HYSTERIA2-JUMP" >> $client_dir
-            
-            get_info # 重新生成订阅文件
-            while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
-            green "\nhysteria2端口跳跃已开启,跳跃端口为：${purple}$min_port-$max_port${re} ${green}请更新或手动复制以上hysteria2节点${re}\n"
+            get_info # 重新生成节点信息
+            check_nodes
             ;;
         5)  
             # 清理 iptables 规则
@@ -778,7 +808,7 @@ EOF
             
             # 从 hysteria2 URL 中移除 mport 参数
             sed -i '/hysteria2/s/&mport=[^#&]*//g' $client_dir
-            get_info # 重新生成订阅文件
+            get_info # 重新生成节点信息
             green "\n端口跳跃已删除\n"
             ;;
         0)  menu ;;
@@ -786,7 +816,7 @@ EOF
     esac
 }
 
-# 查看节点信息和订阅链接
+# 查看节点信息和配置
 check_nodes() {
     clear
     if [ ! -f ${work_dir}/url.txt ]; then
@@ -795,27 +825,25 @@ check_nodes() {
         return
     fi
     
-    server_ip=$(get_realip)
-    
-    yellow "=== 当前节点配置信息 (原始 URL 格式) ===\n"
+    yellow "=== 节点信息 (V2rayN/原始 URL 格式) ===\n"
     while IFS= read -r line; do purple "${purple}$line"; done < ${work_dir}/url.txt
     
     green "\n=========================================================================================="
-    yellow "\n请手动复制以上节点信息到您的客户端，或使用以下订阅链接:\n"
+    yellow "=== 节点配置片段 (Clash Meta/Mihomo/Clash Premium 兼容) ===\n"
     
-    # Base64 订阅内容 (sub.txt 文件内容是 url.txt 的 Base64 编码)
-    encoded_sub_url="http://${server_ip}/sub.txt"
+    # 输出 Clash Meta 配置片段
+    while IFS= read -r line; do 
+        if [[ $line == "# ---"* ]]; then
+            green "$line"
+        else
+            skyblue "$line"
+        fi
+    done < ${work_dir}/meta.txt
     
-    green "--- V2rayN, Shadowrocket, Nekobox 等客户端订阅链接 (Base64 原链接): ${purple}${encoded_sub_url}${re}\n"
-    
-    green "--- Clash/Mihomo 系列客户端订阅链接 (需第三方转换): ${purple}https://sublink.eooce.com/clash?config=${encoded_sub_url}${re}\n"
-    
-    green "--- Sing-Box 客户端订阅链接 (需第三方转换): ${purple}https://sublink.eooce.com/singbox?config=${encoded_sub_url}${re}\n"
-    
-    yellow "\n温馨提示：请自行确保服务器防火墙已放行 80 端口（用于提供订阅服务）。\n"
+    yellow "\n温馨提示：请手动复制以上详细配置信息到您的 Clash Meta/Mihomo 配置文件的 **proxies** 部分。\n"
 }
 
-# 主菜单
+# 主菜单 (保持不变)
 menu() {
    singbox_status=$(check_singbox 2>/dev/null)
    
@@ -831,7 +859,7 @@ menu() {
    echo "==============="
    green "3. sing-box管理"
    echo  "==============="
-   green  "4. 查看节点信息和订阅"
+   green  "4. 查看节点信息和配置"
    green  "5. 修改节点配置"
    echo  "==============="
    purple "6. ssh综合工具箱"
@@ -867,23 +895,10 @@ while true; do
                     exit 1 
                 fi
 
-                # 确保 80 端口用于提供订阅服务
+                # 确保 80 端口放行 (如果有需要，尽管没有订阅)
                 allow_port 80/tcp > /dev/null 2>&1
 
-                # 准备订阅文件 (通过 Base64 编码方式提供)
                 get_info
-                
-                # 模拟一个简单的 http 服务器提供订阅文件
-                # 考虑到没有 Nginx，使用一个简易方法
-                if command_exists busybox; then
-                    yellow "使用 busybox httpd 模拟提供订阅服务..."
-                    mkdir -p /var/www/html
-                    cp ${work_dir}/sub.txt /var/www/html/
-                    (busybox httpd -p 80 -h /var/www/html > /dev/null 2>&1 &)
-                else
-                    yellow "请注意：由于未安装 Nginx 或 busybox，订阅链接需要您自行托管或配置。"
-                fi
-
                 create_shortcut
                 check_nodes
             fi
