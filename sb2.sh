@@ -3,8 +3,7 @@
 # =========================
 # 老王sing-box精简安装脚本
 # vless-reality|hysteria2
-# 最终修正版：含 Clash 单行格式输出
-# 最后更新时间: 2025.10.6
+# 精简于 2025.10.5
 # =========================
 
 export LANG=en_US.UTF-8
@@ -27,7 +26,6 @@ server_name="sing-box"
 work_dir="/etc/sing-box"
 config_dir="${work_dir}/config.json"
 client_dir="${work_dir}/url.txt"
-meta_dir="${work_dir}/meta.txt" # 新增：用于存储单行 Clash Meta 格式
 export vless_port=${PORT:-$(shuf -i 10000-65000 -n 1)}
 
 # 检查是否为root下运行
@@ -228,7 +226,7 @@ install_singbox() {
     # 检测网络类型并设置DNS策略
     dns_strategy=$(ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 && echo "prefer_ipv4" || (ping -c 1 -W 3 2001:4860:4860::8888 >/dev/null 2>&1 && echo "prefer_ipv6" || echo "prefer_ipv4"))
 
-   # 生成配置文件 (内容保持不变)
+   # 生成配置文件
 cat > "${config_dir}" << EOF
 {
   "log": {
@@ -353,7 +351,7 @@ cat > "${config_dir}" << EOF
 EOF
 }
 
-# debian/ubuntu/centos 守护进程 (保持不变)
+# debian/ubuntu/centos 守护进程
 main_systemd_services() {
     cat > /etc/systemd/system/sing-box.service << EOF
 [Unit]
@@ -388,7 +386,7 @@ EOF
     systemctl start sing-box
 }
 
-# 适配alpine 守护进程 (保持不变)
+# 适配alpine 守护进程
 alpine_openrc_services() {
     cat > /etc/init.d/sing-box << 'EOF'
 #!/sbin/openrc-run
@@ -404,69 +402,32 @@ EOF
     rc-update add sing-box default > /dev/null 2>&1
 }
 
-# 生成节点信息 (原始 URL 和 Clash Meta 格式)
+# 生成节点和订阅链接
 get_info() {  
   yellow "\nip检测中,请稍等...\n"
   server_ip=$(get_realip)
   clear
   isp=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g' || echo "vps")
   
-  # --- Vless-Reality 配置获取 ---
+  # vless-reality
   vless_port_config=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .listen_port' "$config_dir")
-  uuid=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .users[0].uuid' "$config_dir")
-  private_key=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.reality.private_key' "$config_dir")
-  
-  # *** 核心修复：确保 public_key 准确获取 ***
-  public_key=$(/etc/sing-box/sing-box generate reality-keypair --private-key "$private_key" | awk '/PublicKey:/ {print $2}' 2>/dev/null)
-  
+  public_key=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.reality.private_key' "$config_dir" | /etc/sing-box/sing-box generate reality-keypair | awk '/PublicKey:/ {print $2}')
   vless_sni=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.server_name' "$config_dir")
-  VLESS_TAG="${isp}_VLESS-REALITY"
-  
-  # Clash Meta Vless Reality 单行格式
-  # 格式: {name: "", type: vless, ..., reality-opts: {public-key: "", short-id: ""}}
-  VLESS_META="{name: \"${VLESS_TAG}\", type: vless, server: ${server_ip}, port: ${vless_port_config}, uuid: ${uuid}, network: tcp, udp: true, tls: true, servername: ${vless_sni}, client-fingerprint: chrome, reality-opts: {public-key: \"${public_key}\", short-id: \"\"}, flow: xtls-rprx-vision}"
-  
-  # --- Hysteria2 配置获取 ---
+
+  # hysteria2
   hy2_port_config=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .listen_port' "$config_dir")
-  hy2_password=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .users[0].password' "$config_dir")
-  
-  # 检查是否有端口跳跃参数 (从旧的 url.txt 中读取，如果文件存在)
-  # 这里使用 $client_dir 检查是为了在 "变更配置" 菜单中能快速获取 mport
-  mport_param=$(grep 'hysteria2://' $client_dir 2>/dev/null | sed -n 's/.*mport=\([^#&]*\).*/\1/p' || echo "")
-  
-  HY2_TAG="${isp}_HYSTERIA2"
-  [ -n "$mport_param" ] && HY2_TAG="${HY2_TAG}_JUMP"
-  
-  # Hysteria2 URL (用于兼容客户端)
-  HY2_URL="hysteria2://${hy2_password}@${server_ip}:${hy2_port_config}/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none"
-  [ -n "$mport_param" ] && HY2_URL="${HY2_URL}&mport=${mport_param}"
-  HY2_URL="${HY2_URL}#${HY2_TAG}"
 
-  # Clash Meta Hysteria2 单行格式
-  # 格式: {name: "", type: hysteria2, ..., tls: {sni: "", insecure: true, alpn: ["h3"]}}
-  HY2_META="{name: \"${HY2_TAG}\", type: hysteria2, server: ${server_ip}, port: ${hy2_port_config}, password: ${hy2_password}, obfs: none, tls: {sni: \"www.bing.com\", insecure: true, alpn: [h3]}}"
-  [ -n "$mport_param" ] && HY2_META=$(echo "$HY2_META" | sed "s/}$/, mport: \"${mport_param}\"}}/")
+  cat > ${work_dir}/url.txt <<EOF
+vless://${uuid}@${server_ip}:${vless_port_config}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${vless_sni}&fp=chrome&pbk=${public_key}&type=tcp&headerType=none#${isp}_VLESS-REALITY
 
-  # --- 写入文件 (原始 URL 格式) ---
-  cat > ${client_dir} <<EOF
-${VLESS_TAG} (V2rayN/原始 URL):
-vless://${uuid}@${server_ip}:${vless_port_config}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${vless_sni}&fp=chrome&pbk=${public_key}&type=tcp&headerType=none#${VLESS_TAG}
-
-${HY2_TAG} (V2rayN/原始 URL):
-${HY2_URL}
+hysteria2://${uuid}@${server_ip}:${hy2_port_config}/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none#${isp}_HYSTERIA2
 EOF
-
-  # --- 写入文件 (Clash Meta 单行格式) ---
-  cat > ${meta_dir} <<EOF
-# ${VLESS_TAG} (Clash Meta/Mihomo 单行格式)
-${VLESS_META}
-
-# ${HY2_TAG} (Clash Meta/Mihomo 单行格式)
-${HY2_META}
-EOF
+echo ""
+while IFS= read -r line; do echo -e "${purple}$line"; done < ${work_dir}/url.txt
+yellow "\n温馨提醒：请手动复制以上节点信息到您的客户端，或构建您自己的订阅服务。\n"
 }
 
-# 通用服务管理函数 (保持不变)
+# 通用服务管理函数
 manage_service() {
     local service_name="$1"
     local action="$2"
@@ -576,7 +537,7 @@ restart_singbox() {
     manage_service "sing-box" "restart"
 }
 
-# 卸载 sing-box (保持不变)
+# 卸载 sing-box
 uninstall_singbox() {
    reading "确定要卸载 sing-box 吗? (y/n): " choice
    case "${choice}" in
@@ -606,12 +567,11 @@ uninstall_singbox() {
    esac
 }
 
-# 创建快捷指令 (保持不变)
+# 创建快捷指令
 create_shortcut() {
   cat > "$work_dir/sb.sh" << EOF
 #!/usr/bin/env bash
 
-# This shortcut runs the script from the original remote source
 bash <(curl -Ls https://raw.githubusercontent.com/eooce/sing-box/main/sing-box.sh) \$1
 EOF
   chmod +x "$work_dir/sb.sh"
@@ -623,13 +583,13 @@ EOF
   fi
 }
 
-# 适配alpine运行dns的问题 (保持不变)
+# 适配alpine运行dns的问题
 change_hosts() {
     sed -i '1s/.*/127.0.0.1   localhost/' /etc/hosts
     sed -i '2s/.*/::1         localhost/' /etc/hosts
 }
 
-# 变更配置 (保持功能和修复后的逻辑)
+# 变更配置
 change_config() {
     # 检查sing-box状态
     local singbox_status=$(check_singbox 2>/dev/null)
@@ -676,8 +636,9 @@ change_config() {
                     sed -i '/"type": "vless"/,/listen_port/ s/"listen_port": [0-9]\+/"listen_port": '"$new_port"'/' $config_dir
                     restart_singbox
                     allow_port $new_port/tcp > /dev/null 2>&1
-                    get_info # 重新生成节点信息
-                    check_nodes
+                    sed -i 's/\(vless:\/\/[^@]*@[^:]*:\)[0-9]\{1,\}/\1'"$new_port"'/' $client_dir
+                    while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
+                    green "\nvless-reality端口已修改成：${purple}$new_port${re} ${green}请更新或手动更改vless-reality端口${re}\n"
                     ;;
                 2)
                     reading "\n请输入hysteria2端口 (回车跳过将使用随机端口): " new_port
@@ -685,8 +646,9 @@ change_config() {
                     sed -i '/"type": "hysteria2"/,/listen_port/ s/"listen_port": [0-9]\+/"listen_port": '"$new_port"'/' $config_dir
                     restart_singbox
                     allow_port $new_port/udp > /dev/null 2>&1
-                    get_info # 重新生成节点信息
-                    check_nodes
+                    sed -i 's/\(hysteria2:\/\/[^@]*@[^:]*:\)[0-9]\{1,\}/\1'"$new_port"'/' $client_dir
+                    while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
+                    green "\nhysteria2端口已修改为：${purple}${new_port}${re} ${green}请更新或手动更改hysteria2端口${re}\n"
                     ;;
                 0)  change_config ;;
                 *)  red "无效的选项，请输入 1 或 2" ;;
@@ -702,8 +664,9 @@ change_config() {
             ' $config_dir
 
             restart_singbox
-            get_info # 重新生成节点信息
-            check_nodes
+            sed -i -E 's/(vless:\/\/|hysteria2:\/\/)[^@]*(@.*)/\1'"$new_uuid"'\2/' $client_dir
+            while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
+            green "\nUUID已修改为：${purple}${new_uuid}${re} ${green}请更新或手动更改所有节点的UUID${re}\n"
             ;;
         3)  
             clear
@@ -730,8 +693,10 @@ change_config() {
                 (.inbounds[] | select(.type == "vless") | .tls.reality.handshake.server) = $new_sni
                 ' "$config_dir" > "/tmp/config.json.tmp" && mv "/tmp/config.json.tmp" "$config_dir"
                 restart_singbox
-                get_info # 重新生成节点信息
-                check_nodes
+                sed -i "s/\(vless:\/\/[^\?]*\?\([^\&]*\&\)*sni=\)[^&]*/\1$new_sni/" $client_dir
+                while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
+                echo ""
+                green "\nReality sni已修改为：${purple}${new_sni}${re} ${green}请更新或手动更改reality节点的sni域名${re}\n"
             ;; 
         4)  
             purple "端口跳跃需确保跳跃区间的端口没有被占用，nat鸡请注意可用端口范围，否则可能造成节点不通\n"
@@ -741,19 +706,15 @@ change_config() {
             reading "\n请输入跳跃结束端口 (需大于起始端口): " max_port
             [ -z "$max_port" ] && max_port=$(($min_port + 100)) 
             yellow "你的结束端口为：$max_port\n"
-            purple "正在设置端口跳跃规则中，请稍等...\n"
-            listen_port=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .listen_port' "$config_dir")
-            
-            # 配置 iptables/ip6tables 规则
+            purple "正在安装依赖，并设置端口跳跃规则中，请稍等...\n"
+            listen_port=$(sed -n '/"tag": "hysteria2"/,/}/s/.*"listen_port": \([0-9]*\).*/\1/p' $config_dir)
             iptables -t nat -A PREROUTING -p udp --dport $min_port:$max_port -j DNAT --to-destination :$listen_port > /dev/null
             command -v ip6tables &> /dev/null && ip6tables -t nat -A PREROUTING -p udp --dport $min_port:$max_port -j DNAT --to-destination :$listen_port > /dev/null
-            
-            # 规则持久化
             if command_exists rc-service 2>/dev/null; then
                 iptables-save > /etc/iptables/rules.v4
                 command -v ip6tables &> /dev/null && ip6tables-save > /etc/iptables/rules.v6
-                if ! grep -q "iptables-restore" /etc/init.d/iptables 2>/dev/null; then
-                    cat << 'EOF' > /etc/init.d/iptables
+
+                cat << 'EOF' > /etc/init.d/iptables
 #!/sbin/openrc-run
 
 depend() {
@@ -765,46 +726,44 @@ start() {
     command -v ip6tables &> /dev/null && [ -f /etc/iptables/rules.v6 ] && ip6tables-restore < /etc/iptables/rules.v6
 }
 EOF
-                    chmod +x /etc/init.d/iptables && rc-update add iptables default && /etc/init.d/iptables start
-                fi
+
+                chmod +x /etc/init.d/iptables && rc-update add iptables default && /etc/init.d/iptables start
+            elif [ -f /etc/debian_version ]; then
+                DEBIAN_FRONTEND=noninteractive apt install -y iptables-persistent > /dev/null 2>&1 && netfilter-persistent save > /dev/null 2>&1 
+                systemctl enable netfilter-persistent > /dev/null 2>&1 && systemctl start netfilter-persistent > /dev/null 2>&1
+            elif [ -f /etc/redhat-release ]; then
+                manage_packages install iptables-services > /dev/null 2>&1 && service iptables save > /dev/null 2>&1
+                systemctl enable iptables > /dev/null 2>&1 && systemctl start iptables > /dev/null 2>&1
+                command -v ip6tables &> /dev/null && service ip6tables save > /dev/null 2>&1
+                systemctl enable ip6tables > /dev/null 2>&1 && systemctl start ip6tables > /dev/null 2>&1
             else
-                manage_packages install iptables-persistent > /dev/null 2>&1
-                netfilter-persistent save > /dev/null 2>&1
-            fi
-
+                red "未知系统,请自行将跳跃端口转发到主端口" && exit 1
+            fi            
             restart_singbox
-            
-            # 标记端口跳跃参数到 url.txt 文件 (通过更新并重新生成文件来实现)
-            # 这里是关键，需要先手动在 url.txt 中加入 mport 信息，get_info 才能读取并使用
-            mport_tag="&mport=${min_port}-${max_port}"
-            # 移除旧的 hysteria2 行
-            sed -i '/hysteria2:/d' $client_dir 2>/dev/null
-            # 重新插入包含 mport 的 hysteria2 行
-            HY2_URL_TEMP=$(get_info | grep 'hysteria2://' | sed 's/#.*//')
-            if [ -n "$HY2_URL_TEMP" ]; then
-                echo "${HY2_URL_TEMP}${mport_tag}#${isp}_HYSTERIA2_JUMP" >> $client_dir
-            fi
-
-            get_info # 重新生成节点信息
-            check_nodes
+            ip=$(get_realip)
+            uuid=$(sed -n 's/.*hysteria2:\/\/\([^@]*\)@.*/\1/p' $client_dir)
+            line_number=$(grep -n 'hysteria2://' $client_dir | cut -d':' -f1)
+            isp=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g' || echo "vps")
+            sed -i.bak "/hysteria2:/d" $client_dir
+            # 使用正确的 listen_port 和 url 结构
+            sed -i "${line_number}i hysteria2://$uuid@$ip:$listen_port/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none&mport=$min_port-$max_port#$isp" $client_dir
+            while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
+            green "\nhysteria2端口跳跃已开启,跳跃端口为：${purple}$min_port-$max_port${re} ${green}请更新或手动复制以上hysteria2节点${re}\n"
             ;;
         5)  
-            # 清理 iptables 规则
             iptables -t nat -F PREROUTING  > /dev/null 2>&1
             command -v ip6tables &> /dev/null && ip6tables -t nat -F PREROUTING  > /dev/null 2>&1
-            
-            # 规则持久化
             if command_exists rc-service 2>/dev/null; then
-                rc-update del iptables default 2>/dev/null && rm -rf /etc/init.d/iptables 2>/dev/null
-                iptables-save > /etc/iptables/rules.v4 2>/dev/null
-                command -v ip6tables &> /dev/null && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null
-            else
+                rc-update del iptables default && rm -rf /etc/init.d/iptables 
+            elif [ -f /etc/redhat-release ]; then
                 netfilter-persistent save > /dev/null 2>&1
+            elif [ -f /etc/redhat-release ]; then
+                service iptables save > /dev/null 2>&1
+                command -v ip6tables &> /dev/null && service ip6tables save > /dev/null 2>&1
+            else
+                manage_packages uninstall iptables iptables-persistent iptables-service > /dev/null 2>&1
             fi
-            
-            # 从 hysteria2 URL 中移除 mport 参数
-            sed -i '/hysteria2/s/&mport=[^#&]*//g' $client_dir
-            get_info # 重新生成节点信息 (将不再包含 mport 参数)
+            sed -i '/hysteria2/s/&mport=[^#&]*//g' /etc/sing-box/url.txt
             green "\n端口跳跃已删除\n"
             ;;
         0)  menu ;;
@@ -812,34 +771,48 @@ EOF
     esac
 }
 
-# 查看节点信息和配置
+# singbox 管理
+manage_singbox() {
+    # 检查sing-box状态
+    local singbox_status=$(check_singbox 2>/dev/null)
+    local singbox_installed=$?
+    
+    clear
+    echo ""
+    green "=== sing-box 管理 ===\n"
+    green "sing-box当前状态: $singbox_status\n"
+    green "1. 启动sing-box服务"
+    skyblue "-------------------"
+    green "2. 停止sing-box服务"
+    skyblue "-------------------"
+    green "3. 重启sing-box服务"
+    skyblue "-------------------"
+    purple "0. 返回主菜单"
+    skyblue "------------"
+    reading "\n请输入选择: " choice
+    case "${choice}" in
+        1) start_singbox ;;  
+        2) stop_singbox ;;
+        3) restart_singbox ;;
+        0) menu ;;
+        *) red "无效的选项！" && sleep 1 && manage_singbox;;
+    esac
+}
+
+# 查看节点信息
 check_nodes() {
     clear
-    if [ ! -f ${client_dir} ]; then
-        red "节点信息文件不存在，请先安装 sing-box。"
+    if [ ! -f ${work_dir}/url.txt ]; then
+        red "节点信息文件 ${work_dir}/url.txt 不存在，请先安装 sing-box。"
         sleep 2
         return
     fi
-    
-    yellow "=== 节点信息 (V2rayN/原始 URL 格式) ===\n"
-    while IFS= read -r line; do purple "${purple}$line"; done < ${client_dir}
-    
-    green "\n=========================================================================================="
-    yellow "=== 节点配置片段 (Clash Meta/Mihomo/Clash Premium 单行格式) ===\n"
-    
-    # 输出 Clash Meta 配置片段
-    while IFS= read -r line; do 
-        if [[ $line == "# "* ]]; then
-            green "$line"
-        else
-            skyblue "$line"
-        fi
-    done < ${meta_dir}
-    
-    yellow "\n温馨提示：请手动复制以上详细配置信息到您的 Clash Meta/Mihomo 配置文件的 **proxies** 列表。\n"
+    yellow "=== 当前节点配置信息 ===\n"
+    while IFS= read -r line; do purple "${purple}$line"; done < ${work_dir}/url.txt
+    yellow "\n请手动复制以上节点信息到您的客户端。\n"
 }
 
-# 主菜单 (保持不变)
+# 主菜单
 menu() {
    singbox_status=$(check_singbox 2>/dev/null)
    
@@ -855,7 +828,7 @@ menu() {
    echo "==============="
    green "3. sing-box管理"
    echo  "==============="
-   green  "4. 查看节点信息和配置"
+   green  "4. 查看节点信息"
    green  "5. 修改节点配置"
    echo  "==============="
    purple "6. ssh综合工具箱"
@@ -878,7 +851,7 @@ while true; do
             if [ ${check_singbox} -eq 0 ]; then
                 yellow "sing-box 已经安装！\n"
             else
-                manage_packages install jq tar openssl coreutils net-tools
+                manage_packages install jq tar openssl coreutils
                 install_singbox
                 if command_exists systemctl; then
                     main_systemd_services
@@ -891,9 +864,9 @@ while true; do
                     exit 1 
                 fi
 
+                sleep 5
                 get_info
                 create_shortcut
-                check_nodes
             fi
            ;;
         2) uninstall_singbox ;;
