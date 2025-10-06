@@ -3,7 +3,8 @@
 # =========================
 # 老王sing-box精简安装脚本
 # vless-reality|hysteria2
-# 修复并优化于 2025.10.6
+# 最终修正版：含 Clash 单行格式输出
+# 最后更新时间: 2025.10.6
 # =========================
 
 export LANG=en_US.UTF-8
@@ -26,7 +27,7 @@ server_name="sing-box"
 work_dir="/etc/sing-box"
 config_dir="${work_dir}/config.json"
 client_dir="${work_dir}/url.txt"
-meta_dir="${work_dir}/meta.txt" # 用于存储单行 Clash Meta 格式
+meta_dir="${work_dir}/meta.txt" # 新增：用于存储单行 Clash Meta 格式
 export vless_port=${PORT:-$(shuf -i 10000-65000 -n 1)}
 
 # 检查是否为root下运行
@@ -189,7 +190,7 @@ allow_port() {
     fi
 }
 
-# 下载并安装 sing-box (保持不变)
+# 下载并安装 sing-box
 install_singbox() {
     clear
     purple "正在安装sing-box中，请稍后..."
@@ -227,7 +228,7 @@ install_singbox() {
     # 检测网络类型并设置DNS策略
     dns_strategy=$(ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 && echo "prefer_ipv4" || (ping -c 1 -W 3 2001:4860:4860::8888 >/dev/null 2>&1 && echo "prefer_ipv6" || echo "prefer_ipv4"))
 
-   # 生成配置文件
+   # 生成配置文件 (内容保持不变)
 cat > "${config_dir}" << EOF
 {
   "log": {
@@ -415,7 +416,7 @@ get_info() {
   uuid=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .users[0].uuid' "$config_dir")
   private_key=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.reality.private_key' "$config_dir")
   
-  # *** 核心修复：使用 sing-box 工具生成 Public Key ***
+  # *** 核心修复：确保 public_key 准确获取 ***
   public_key=$(/etc/sing-box/sing-box generate reality-keypair --private-key "$private_key" | awk '/PublicKey:/ {print $2}' 2>/dev/null)
   
   vless_sni=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.server_name' "$config_dir")
@@ -430,6 +431,7 @@ get_info() {
   hy2_password=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .users[0].password' "$config_dir")
   
   # 检查是否有端口跳跃参数 (从旧的 url.txt 中读取，如果文件存在)
+  # 这里使用 $client_dir 检查是为了在 "变更配置" 菜单中能快速获取 mport
   mport_param=$(grep 'hysteria2://' $client_dir 2>/dev/null | sed -n 's/.*mport=\([^#&]*\).*/\1/p' || echo "")
   
   HY2_TAG="${isp}_HYSTERIA2"
@@ -443,7 +445,7 @@ get_info() {
   # Clash Meta Hysteria2 单行格式
   # 格式: {name: "", type: hysteria2, ..., tls: {sni: "", insecure: true, alpn: ["h3"]}}
   HY2_META="{name: \"${HY2_TAG}\", type: hysteria2, server: ${server_ip}, port: ${hy2_port_config}, password: ${hy2_password}, obfs: none, tls: {sni: \"www.bing.com\", insecure: true, alpn: [h3]}}"
-  [ -n "$mport_param" ] && HY2_META=$(echo "$HY2_META" | sed "s/}$/, mport: ${mport_param}}/")
+  [ -n "$mport_param" ] && HY2_META=$(echo "$HY2_META" | sed "s/}$/, mport: \"${mport_param}\"}}/")
 
   # --- 写入文件 (原始 URL 格式) ---
   cat > ${client_dir} <<EOF
@@ -627,7 +629,7 @@ change_hosts() {
     sed -i '2s/.*/::1         localhost/' /etc/hosts
 }
 
-# 变更配置 (修复并精简逻辑)
+# 变更配置 (保持功能和修复后的逻辑)
 change_config() {
     # 检查sing-box状态
     local singbox_status=$(check_singbox 2>/dev/null)
@@ -773,7 +775,17 @@ EOF
             restart_singbox
             
             # 标记端口跳跃参数到 url.txt 文件 (通过更新并重新生成文件来实现)
-            get_info # 重新生成节点信息，它会包含新的 mport 参数
+            # 这里是关键，需要先手动在 url.txt 中加入 mport 信息，get_info 才能读取并使用
+            mport_tag="&mport=${min_port}-${max_port}"
+            # 移除旧的 hysteria2 行
+            sed -i '/hysteria2:/d' $client_dir 2>/dev/null
+            # 重新插入包含 mport 的 hysteria2 行
+            HY2_URL_TEMP=$(get_info | grep 'hysteria2://' | sed 's/#.*//')
+            if [ -n "$HY2_URL_TEMP" ]; then
+                echo "${HY2_URL_TEMP}${mport_tag}#${isp}_HYSTERIA2_JUMP" >> $client_dir
+            fi
+
+            get_info # 重新生成节点信息
             check_nodes
             ;;
         5)  
