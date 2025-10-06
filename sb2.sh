@@ -3,7 +3,7 @@
 # =========================
 # 老王sing-box精简安装脚本
 # vless-reality|hysteria2
-# 精简于 2025.9.5
+# 精简并优化于 2025.10.6
 # =========================
 
 export LANG=en_US.UTF-8
@@ -416,15 +416,16 @@ get_info() {
 
   # hysteria2
   hy2_port_config=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .listen_port' "$config_dir")
-
+  
+  # 清理旧的url.txt并生成新的
   cat > ${work_dir}/url.txt <<EOF
 vless://${uuid}@${server_ip}:${vless_port_config}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${vless_sni}&fp=chrome&pbk=${public_key}&type=tcp&headerType=none#${isp}_VLESS-REALITY
 
 hysteria2://${uuid}@${server_ip}:${hy2_port_config}/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none#${isp}_HYSTERIA2
 EOF
-echo ""
-while IFS= read -r line; do echo -e "${purple}$line"; done < ${work_dir}/url.txt
-yellow "\n温馨提醒：请手动复制以上节点信息到您的客户端，或构建您自己的订阅服务。\n"
+  # 生成 Base64 订阅内容
+  base64 -w0 ${work_dir}/url.txt > ${work_dir}/sub.txt
+  chmod 644 ${work_dir}/sub.txt
 }
 
 # 通用服务管理函数
@@ -572,6 +573,7 @@ create_shortcut() {
   cat > "$work_dir/sb.sh" << EOF
 #!/usr/bin/env bash
 
+# This shortcut runs the script from the original remote source
 bash <(curl -Ls https://raw.githubusercontent.com/eooce/sing-box/main/sing-box.sh) \$1
 EOF
   chmod +x "$work_dir/sb.sh"
@@ -637,6 +639,7 @@ change_config() {
                     restart_singbox
                     allow_port $new_port/tcp > /dev/null 2>&1
                     sed -i 's/\(vless:\/\/[^@]*@[^:]*:\)[0-9]\{1,\}/\1'"$new_port"'/' $client_dir
+                    get_info # 重新生成订阅文件
                     while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
                     green "\nvless-reality端口已修改成：${purple}$new_port${re} ${green}请更新或手动更改vless-reality端口${re}\n"
                     ;;
@@ -646,7 +649,9 @@ change_config() {
                     sed -i '/"type": "hysteria2"/,/listen_port/ s/"listen_port": [0-9]\+/"listen_port": '"$new_port"'/' $config_dir
                     restart_singbox
                     allow_port $new_port/udp > /dev/null 2>&1
-                    sed -i 's/\(hysteria2:\/\/[^@]*@[^:]*:\)[0-9]\{1,\}/\1'"$new_port"'/' $client_dir
+                    # 确保只替换了主端口，保留 mport 参数
+                    sed -i -E 's/(hysteria2:\/\/[^@]*@[^:]*:)[0-9]+(\/.*#.*)/\1'"$new_port"'\2/' $client_dir
+                    get_info # 重新生成订阅文件
                     while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
                     green "\nhysteria2端口已修改为：${purple}${new_port}${re} ${green}请更新或手动更改hysteria2端口${re}\n"
                     ;;
@@ -664,7 +669,9 @@ change_config() {
             ' $config_dir
 
             restart_singbox
-            sed -i -E 's/(vless:\/\/|hysteria2:\/\/)[^@]*(@.*)/\1'"$new_uuid"'\2/' $client_dir
+            # 替换所有节点的 UUID/密码
+            sed -i -E 's/(vless:\/\/|hysteria2:\/\/)[^@/]*(@|\/)/\1'"$new_uuid"'\2/' $client_dir
+            get_info # 重新生成订阅文件
             while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
             green "\nUUID已修改为：${purple}${new_uuid}${re} ${green}请更新或手动更改所有节点的UUID${re}\n"
             ;;
@@ -693,7 +700,9 @@ change_config() {
                 (.inbounds[] | select(.type == "vless") | .tls.reality.handshake.server) = $new_sni
                 ' "$config_dir" > "/tmp/config.json.tmp" && mv "/tmp/config.json.tmp" "$config_dir"
                 restart_singbox
+                # 更新 vless 节点的 sni
                 sed -i "s/\(vless:\/\/[^\?]*\?\([^\&]*\&\)*sni=\)[^&]*/\1$new_sni/" $client_dir
+                get_info # 重新生成订阅文件
                 while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
                 echo ""
                 green "\nReality sni已修改为：${purple}${new_sni}${re} ${green}请更新或手动更改reality节点的sni域名${re}\n"
@@ -706,15 +715,20 @@ change_config() {
             reading "\n请输入跳跃结束端口 (需大于起始端口): " max_port
             [ -z "$max_port" ] && max_port=$(($min_port + 100)) 
             yellow "你的结束端口为：$max_port\n"
-            purple "正在安装依赖，并设置端口跳跃规则中，请稍等...\n"
-            listen_port=$(sed -n '/"tag": "hysteria2"/,/}/s/.*"listen_port": \([0-9]*\).*/\1/p' $config_dir)
+            purple "正在设置端口跳跃规则中，请稍等...\n"
+            listen_port=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .listen_port' "$config_dir")
+            
+            # 配置 iptables/ip6tables 规则
             iptables -t nat -A PREROUTING -p udp --dport $min_port:$max_port -j DNAT --to-destination :$listen_port > /dev/null
             command -v ip6tables &> /dev/null && ip6tables -t nat -A PREROUTING -p udp --dport $min_port:$max_port -j DNAT --to-destination :$listen_port > /dev/null
+            
+            # 规则持久化 (与 allow_port 逻辑类似，简化避免重复安装)
             if command_exists rc-service 2>/dev/null; then
                 iptables-save > /etc/iptables/rules.v4
                 command -v ip6tables &> /dev/null && ip6tables-save > /etc/iptables/rules.v6
-
-                cat << 'EOF' > /etc/init.d/iptables
+                # Alpine 需要确保 iptables 服务在启动时加载规则
+                if ! grep -q "iptables-restore" /etc/init.d/iptables 2>/dev/null; then
+                    cat << 'EOF' > /etc/init.d/iptables
 #!/sbin/openrc-run
 
 depend() {
@@ -726,44 +740,45 @@ start() {
     command -v ip6tables &> /dev/null && [ -f /etc/iptables/rules.v6 ] && ip6tables-restore < /etc/iptables/rules.v6
 }
 EOF
-
-                chmod +x /etc/init.d/iptables && rc-update add iptables default && /etc/init.d/iptables start
-            elif [ -f /etc/debian_version ]; then
-                DEBIAN_FRONTEND=noninteractive apt install -y iptables-persistent > /dev/null 2>&1 && netfilter-persistent save > /dev/null 2>&1 
-                systemctl enable netfilter-persistent > /dev/null 2>&1 && systemctl start netfilter-persistent > /dev/null 2>&1
-            elif [ -f /etc/redhat-release ]; then
-                manage_packages install iptables-services > /dev/null 2>&1 && service iptables save > /dev/null 2>&1
-                systemctl enable iptables > /dev/null 2>&1 && systemctl start iptables > /dev/null 2>&1
-                command -v ip6tables &> /dev/null && service ip6tables save > /dev/null 2>&1
-                systemctl enable ip6tables > /dev/null 2>&1 && systemctl start ip6tables > /dev/null 2>&1
+                    chmod +x /etc/init.d/iptables && rc-update add iptables default && /etc/init.d/iptables start
+                fi
             else
-                red "未知系统,请自行将跳跃端口转发到主端口" && exit 1
-            fi            
+                manage_packages install iptables-persistent > /dev/null 2>&1
+                netfilter-persistent save > /dev/null 2>&1
+            fi
+
             restart_singbox
-            ip=$(get_realip)
-            uuid=$(sed -n 's/.*hysteria2:\/\/\([^@]*\)@.*/\1/p' $client_dir)
-            line_number=$(grep -n 'hysteria2://' $client_dir | cut -d':' -f1)
+            
+            # 更新 hysteria2 节点 URL，添加 mport 参数
+            uuid=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .users[0].password' "$config_dir")
             isp=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g' || echo "vps")
+            
+            # 移除旧的 hysteria2 节点 (如果存在多行)
             sed -i.bak "/hysteria2:/d" $client_dir
-            # 使用正确的 listen_port 和 url 结构
-            sed -i "${line_number}i hysteria2://$uuid@$ip:$listen_port/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none&mport=$min_port-$max_port#$isp" $client_dir
+            # 插入新的 hysteria2 节点
+            echo "hysteria2://${uuid}@$ip:$listen_port/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none&mport=$min_port-$max_port#${isp}_HYSTERIA2-JUMP" >> $client_dir
+            
+            get_info # 重新生成订阅文件
             while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
             green "\nhysteria2端口跳跃已开启,跳跃端口为：${purple}$min_port-$max_port${re} ${green}请更新或手动复制以上hysteria2节点${re}\n"
             ;;
         5)  
+            # 清理 iptables 规则
             iptables -t nat -F PREROUTING  > /dev/null 2>&1
             command -v ip6tables &> /dev/null && ip6tables -t nat -F PREROUTING  > /dev/null 2>&1
+            
+            # 规则持久化
             if command_exists rc-service 2>/dev/null; then
-                rc-update del iptables default && rm -rf /etc/init.d/iptables 
-            elif [ -f /etc/redhat-release ]; then
-                netfilter-persistent save > /dev/null 2>&1
-            elif [ -f /etc/redhat-release ]; then
-                service iptables save > /dev/null 2>&1
-                command -v ip6tables &> /dev/null && service ip6tables save > /dev/null 2>&1
+                rc-update del iptables default 2>/dev/null && rm -rf /etc/init.d/iptables 2>/dev/null
+                iptables-save > /etc/iptables/rules.v4 2>/dev/null
+                command -v ip6tables &> /dev/null && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null
             else
-                manage_packages uninstall iptables iptables-persistent iptables-service > /dev/null 2>&1
+                netfilter-persistent save > /dev/null 2>&1
             fi
-            sed -i '/hysteria2/s/&mport=[^#&]*//g' /etc/sing-box/url.txt
+            
+            # 从 hysteria2 URL 中移除 mport 参数
+            sed -i '/hysteria2/s/&mport=[^#&]*//g' $client_dir
+            get_info # 重新生成订阅文件
             green "\n端口跳跃已删除\n"
             ;;
         0)  menu ;;
@@ -771,35 +786,7 @@ EOF
     esac
 }
 
-# singbox 管理
-manage_singbox() {
-    # 检查sing-box状态
-    local singbox_status=$(check_singbox 2>/dev/null)
-    local singbox_installed=$?
-    
-    clear
-    echo ""
-    green "=== sing-box 管理 ===\n"
-    green "sing-box当前状态: $singbox_status\n"
-    green "1. 启动sing-box服务"
-    skyblue "-------------------"
-    green "2. 停止sing-box服务"
-    skyblue "-------------------"
-    green "3. 重启sing-box服务"
-    skyblue "-------------------"
-    purple "0. 返回主菜单"
-    skyblue "------------"
-    reading "\n请输入选择: " choice
-    case "${choice}" in
-        1) start_singbox ;;  
-        2) stop_singbox ;;
-        3) restart_singbox ;;
-        0) menu ;;
-        *) red "无效的选项！" && sleep 1 && manage_singbox;;
-    esac
-}
-
-# 查看节点信息
+# 查看节点信息和订阅链接
 check_nodes() {
     clear
     if [ ! -f ${work_dir}/url.txt ]; then
@@ -807,9 +794,25 @@ check_nodes() {
         sleep 2
         return
     fi
-    yellow "=== 当前节点配置信息 ===\n"
+    
+    server_ip=$(get_realip)
+    
+    yellow "=== 当前节点配置信息 (原始 URL 格式) ===\n"
     while IFS= read -r line; do purple "${purple}$line"; done < ${work_dir}/url.txt
-    yellow "\n请手动复制以上节点信息到您的客户端。\n"
+    
+    green "\n=========================================================================================="
+    yellow "\n请手动复制以上节点信息到您的客户端，或使用以下订阅链接:\n"
+    
+    # Base64 订阅内容 (sub.txt 文件内容是 url.txt 的 Base64 编码)
+    encoded_sub_url="http://${server_ip}/sub.txt"
+    
+    green "--- V2rayN, Shadowrocket, Nekobox 等客户端订阅链接 (Base64 原链接): ${purple}${encoded_sub_url}${re}\n"
+    
+    green "--- Clash/Mihomo 系列客户端订阅链接 (需第三方转换): ${purple}https://sublink.eooce.com/clash?config=${encoded_sub_url}${re}\n"
+    
+    green "--- Sing-Box 客户端订阅链接 (需第三方转换): ${purple}https://sublink.eooce.com/singbox?config=${encoded_sub_url}${re}\n"
+    
+    yellow "\n温馨提示：请自行确保服务器防火墙已放行 80 端口（用于提供订阅服务）。\n"
 }
 
 # 主菜单
@@ -828,7 +831,7 @@ menu() {
    echo "==============="
    green "3. sing-box管理"
    echo  "==============="
-   green  "4. 查看节点信息"
+   green  "4. 查看节点信息和订阅"
    green  "5. 修改节点配置"
    echo  "==============="
    purple "6. ssh综合工具箱"
@@ -851,7 +854,7 @@ while true; do
             if [ ${check_singbox} -eq 0 ]; then
                 yellow "sing-box 已经安装！\n"
             else
-                manage_packages install jq tar openssl coreutils
+                manage_packages install jq tar openssl coreutils net-tools
                 install_singbox
                 if command_exists systemctl; then
                     main_systemd_services
@@ -864,9 +867,25 @@ while true; do
                     exit 1 
                 fi
 
-                sleep 5
+                # 确保 80 端口用于提供订阅服务
+                allow_port 80/tcp > /dev/null 2>&1
+
+                # 准备订阅文件 (通过 Base64 编码方式提供)
                 get_info
+                
+                # 模拟一个简单的 http 服务器提供订阅文件
+                # 考虑到没有 Nginx，使用一个简易方法
+                if command_exists busybox; then
+                    yellow "使用 busybox httpd 模拟提供订阅服务..."
+                    mkdir -p /var/www/html
+                    cp ${work_dir}/sub.txt /var/www/html/
+                    (busybox httpd -p 80 -h /var/www/html > /dev/null 2>&1 &)
+                else
+                    yellow "请注意：由于未安装 Nginx 或 busybox，订阅链接需要您自行托管或配置。"
+                fi
+
                 create_shortcut
+                check_nodes
             fi
            ;;
         2) uninstall_singbox ;;
