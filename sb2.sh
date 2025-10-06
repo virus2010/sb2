@@ -3,7 +3,7 @@
 # =========================
 # 老王sing-box精简安装脚本
 # vless-reality|hysteria2
-# 精简并优化于 2025.10.6
+# 修复并优化于 2025.10.6
 # =========================
 
 export LANG=en_US.UTF-8
@@ -12,7 +12,7 @@ re="\033[0m"
 red="\033[1;91m"
 green="\e[1;32m"
 yellow="\e[1;33m"
-purple="\e1;35m"
+purple="\e[1;35m"
 skyblue="\e[1;36m"
 red() { echo -e "\e[1;91m$1\033[0m"; }
 green() { echo -e "\e[1;32m$1\033[0m"; }
@@ -26,6 +26,7 @@ server_name="sing-box"
 work_dir="/etc/sing-box"
 config_dir="${work_dir}/config.json"
 client_dir="${work_dir}/url.txt"
+meta_dir="${work_dir}/meta.txt" # 新增：用于存储单行 Clash Meta 格式
 export vless_port=${PORT:-$(shuf -i 10000-65000 -n 1)}
 
 # 检查是否为root下运行
@@ -188,7 +189,7 @@ allow_port() {
     fi
 }
 
-# 下载并安装 sing-box
+# 下载并安装 sing-box (保持不变)
 install_singbox() {
     clear
     purple "正在安装sing-box中，请稍后..."
@@ -351,7 +352,7 @@ cat > "${config_dir}" << EOF
 EOF
 }
 
-# debian/ubuntu/centos 守护进程
+# debian/ubuntu/centos 守护进程 (保持不变)
 main_systemd_services() {
     cat > /etc/systemd/system/sing-box.service << EOF
 [Unit]
@@ -386,7 +387,7 @@ EOF
     systemctl start sing-box
 }
 
-# 适配alpine 守护进程
+# 适配alpine 守护进程 (保持不变)
 alpine_openrc_services() {
     cat > /etc/init.d/sing-box << 'EOF'
 #!/sbin/openrc-run
@@ -413,64 +414,49 @@ get_info() {
   vless_port_config=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .listen_port' "$config_dir")
   uuid=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .users[0].uuid' "$config_dir")
   private_key=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.reality.private_key' "$config_dir")
-  # 重新生成公钥以防万一
   public_key=$(/etc/sing-box/sing-box generate reality-keypair --private-key "$private_key" | awk '/PublicKey:/ {print $2}')
   vless_sni=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.server_name' "$config_dir")
-
-  # Clash Meta Vless Reality 格式
-  VLESS_META="name: ${isp}_VLESS-REALITY
-type: vless
-server: ${server_ip}
-port: ${vless_port_config}
-uuid: ${uuid}
-network: tcp
-udp: true
-tls: true
-servername: ${vless_sni}
-client-fingerprint: chrome
-reality-opts: {public-key: ${public_key}, short-id: \"\"}
-flow: xtls-rprx-vision"
+  VLESS_TAG="${isp}_VLESS-REALITY"
+  
+  # Clash Meta Vless Reality 单行格式
+  # 格式: {name: "", type: vless, ..., reality-opts: {public-key: "", short-id: ""}}
+  VLESS_META="{name: \"${VLESS_TAG}\", type: vless, server: ${server_ip}, port: ${vless_port_config}, uuid: ${uuid}, network: tcp, udp: true, tls: true, servername: ${vless_sni}, client-fingerprint: chrome, reality-opts: {public-key: \"${public_key}\", short-id: \"\"}, flow: xtls-rprx-vision}"
   
   # --- Hysteria2 配置获取 ---
   hy2_port_config=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .listen_port' "$config_dir")
   hy2_password=$(jq -r '.inbounds[] | select(.tag == "hysteria2") | .users[0].password' "$config_dir")
   
-  # 检查是否有端口跳跃参数
-  mport_param=$(grep 'hysteria2://' $client_dir | sed -n 's/.*mport=\([^#&]*\).*/mport=\1/p')
-
+  # 检查是否有端口跳跃参数 (从旧的 url.txt 中读取，如果文件存在)
+  mport_param=$(grep 'hysteria2://' $client_dir 2>/dev/null | sed -n 's/.*mport=\([^#&]*\).*/\1/p' || echo "")
+  
+  HY2_TAG="${isp}_HYSTERIA2"
+  [ -n "$mport_param" ] && HY2_TAG="${HY2_TAG}_JUMP"
+  
   # Hysteria2 URL (用于兼容客户端)
   HY2_URL="hysteria2://${hy2_password}@${server_ip}:${hy2_port_config}/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none"
-  [ -n "$mport_param" ] && HY2_URL="${HY2_URL}&${mport_param}"
-  HY2_URL="${HY2_URL}#${isp}_HYSTERIA2"
+  [ -n "$mport_param" ] && HY2_URL="${HY2_URL}&mport=${mport_param}"
+  HY2_URL="${HY2_URL}#${HY2_TAG}"
 
-  # Clash Meta Hysteria2 格式
-  HY2_META="name: ${isp}_HYSTERIA2${mport_param/+/_JUMP}
-type: hysteria2
-server: ${server_ip}
-port: ${hy2_port_config}
-password: ${hy2_password}
-obfs: none
-tls:
-  sni: www.bing.com
-  insecure: true
-  alpn:
-    - h3"
-  [ -n "$mport_param" ] && HY2_META="${HY2_META}
-mport: ${mport_param/mport=/}"
+  # Clash Meta Hysteria2 单行格式
+  # 格式: {name: "", type: hysteria2, ..., tls: {sni: "", insecure: true, alpn: ["h3"]}}
+  HY2_META="{name: \"${HY2_TAG}\", type: hysteria2, server: ${server_ip}, port: ${hy2_port_config}, password: ${hy2_password}, obfs: none, tls: {sni: \"www.bing.com\", insecure: true, alpn: [h3]}}"
+  [ -n "$mport_param" ] && HY2_META=$(echo "$HY2_META" | sed "s/}$/, mport: ${mport_param}}/")
 
   # --- 写入文件 (原始 URL 格式) ---
-  cat > ${work_dir}/url.txt <<EOF
-vless://${uuid}@${server_ip}:${vless_port_config}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${vless_sni}&fp=chrome&pbk=${public_key}&type=tcp&headerType=none#${isp}_VLESS-REALITY
+  cat > ${client_dir} <<EOF
+${VLESS_TAG} (V2rayN/原始 URL):
+vless://${uuid}@${server_ip}:${vless_port_config}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${vless_sni}&fp=chrome&pbk=${public_key}&type=tcp&headerType=none#${VLESS_TAG}
 
+${HY2_TAG} (V2rayN/原始 URL):
 ${HY2_URL}
 EOF
 
-  # --- 写入文件 (Clash Meta 格式) ---
-  cat > ${work_dir}/meta.txt <<EOF
-# --- Vless-Reality (Clash Meta/Mihomo 配置片段) ---
+  # --- 写入文件 (Clash Meta 单行格式) ---
+  cat > ${meta_dir} <<EOF
+# ${VLESS_TAG} (Clash Meta/Mihomo 单行格式)
 ${VLESS_META}
 
-# --- Hysteria2 (Clash Meta/Mihomo 配置片段) ---
+# ${HY2_TAG} (Clash Meta/Mihomo 单行格式)
 ${HY2_META}
 EOF
 }
@@ -585,7 +571,7 @@ restart_singbox() {
     manage_service "sing-box" "restart"
 }
 
-# 卸载 sing-box
+# 卸载 sing-box (保持不变)
 uninstall_singbox() {
    reading "确定要卸载 sing-box 吗? (y/n): " choice
    case "${choice}" in
@@ -638,7 +624,7 @@ change_hosts() {
     sed -i '2s/.*/::1         localhost/' /etc/hosts
 }
 
-# 变更配置 (精简并修复端口跳跃逻辑)
+# 变更配置 (修复并精简逻辑)
 change_config() {
     # 检查sing-box状态
     local singbox_status=$(check_singbox 2>/dev/null)
@@ -783,13 +769,8 @@ EOF
 
             restart_singbox
             
-            # 标记端口跳跃参数到 url.txt 文件，方便 get_info 读取
-            # 注意：这里我们只更新 url.txt 中的 hysteria2 节点行，添加 mport 参数
-            mport_tag="&mport=${min_port}-${max_port}"
-            sed -i.bak '/hysteria2:/d' $client_dir # 删除旧的 hysteria2 行
-            echo "hysteria2://${uuid}@$ip:$listen_port/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none${mport_tag}#${isp}_HYSTERIA2-JUMP" >> $client_dir
-            
-            get_info # 重新生成节点信息
+            # 标记端口跳跃参数到 url.txt 文件 (通过更新并重新生成文件来实现)
+            get_info # 重新生成节点信息，它会包含新的 mport 参数
             check_nodes
             ;;
         5)  
@@ -808,7 +789,7 @@ EOF
             
             # 从 hysteria2 URL 中移除 mport 参数
             sed -i '/hysteria2/s/&mport=[^#&]*//g' $client_dir
-            get_info # 重新生成节点信息
+            get_info # 重新生成节点信息 (将不再包含 mport 参数)
             green "\n端口跳跃已删除\n"
             ;;
         0)  menu ;;
@@ -819,28 +800,28 @@ EOF
 # 查看节点信息和配置
 check_nodes() {
     clear
-    if [ ! -f ${work_dir}/url.txt ]; then
-        red "节点信息文件 ${work_dir}/url.txt 不存在，请先安装 sing-box。"
+    if [ ! -f ${client_dir} ]; then
+        red "节点信息文件不存在，请先安装 sing-box。"
         sleep 2
         return
     fi
     
     yellow "=== 节点信息 (V2rayN/原始 URL 格式) ===\n"
-    while IFS= read -r line; do purple "${purple}$line"; done < ${work_dir}/url.txt
+    while IFS= read -r line; do purple "${purple}$line"; done < ${client_dir}
     
     green "\n=========================================================================================="
-    yellow "=== 节点配置片段 (Clash Meta/Mihomo/Clash Premium 兼容) ===\n"
+    yellow "=== 节点配置片段 (Clash Meta/Mihomo/Clash Premium 单行格式) ===\n"
     
     # 输出 Clash Meta 配置片段
     while IFS= read -r line; do 
-        if [[ $line == "# ---"* ]]; then
+        if [[ $line == "# "* ]]; then
             green "$line"
         else
             skyblue "$line"
         fi
-    done < ${work_dir}/meta.txt
+    done < ${meta_dir}
     
-    yellow "\n温馨提示：请手动复制以上详细配置信息到您的 Clash Meta/Mihomo 配置文件的 **proxies** 部分。\n"
+    yellow "\n温馨提示：请手动复制以上详细配置信息到您的 Clash Meta/Mihomo 配置文件的 **proxies** 列表。\n"
 }
 
 # 主菜单 (保持不变)
@@ -894,9 +875,6 @@ while true; do
                     echo "Unsupported init system"
                     exit 1 
                 fi
-
-                # 确保 80 端口放行 (如果有需要，尽管没有订阅)
-                allow_port 80/tcp > /dev/null 2>&1
 
                 get_info
                 create_shortcut
