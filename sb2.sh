@@ -26,7 +26,7 @@ server_name="sing-box"
 work_dir="/etc/sing-box"
 config_dir="${work_dir}/config.json"
 client_dir="${work_dir}/url.txt"
-meta_dir="${work_dir}/meta.txt" # 新增：用于存储单行 Clash Meta 格式
+meta_dir="${work_dir}/meta.txt" # 用于存储单行 Clash Meta 格式
 export vless_port=${PORT:-$(shuf -i 10000-65000 -n 1)}
 
 # 检查是否为root下运行
@@ -414,7 +414,10 @@ get_info() {
   vless_port_config=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .listen_port' "$config_dir")
   uuid=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .users[0].uuid' "$config_dir")
   private_key=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.reality.private_key' "$config_dir")
-  public_key=$(/etc/sing-box/sing-box generate reality-keypair --private-key "$private_key" | awk '/PublicKey:/ {print $2}')
+  
+  # *** 核心修复：使用 sing-box 工具生成 Public Key ***
+  public_key=$(/etc/sing-box/sing-box generate reality-keypair --private-key "$private_key" | awk '/PublicKey:/ {print $2}' 2>/dev/null)
+  
   vless_sni=$(jq -r '.inbounds[] | select(.tag == "vless-reality") | .tls.server_name' "$config_dir")
   VLESS_TAG="${isp}_VLESS-REALITY"
   
